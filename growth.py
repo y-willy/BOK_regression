@@ -49,7 +49,6 @@ import matplotlib.font_manager as fm
 from matplotlib.patches import Patch
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  설정  ← 경로만 수정하세요
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HAC_LAGS = 4
 BASE     = r"C:\Users\willy\OneDrive\바탕 화면\회귀분석"
@@ -280,7 +279,7 @@ def build_model_data(macro: pd.DataFrame, ind_df: pd.DataFrame) -> pd.DataFrame:
     df["cpi_lag1"] = df["cpi_lag1"] * 100.0
     df["esi_lag1"] = df["esi_lag1"] * 100.0
     
-    # 3. 종속변수와 경기 관성 변수 (AR항) 스케일 통일 ⭐️
+    # 3. 종속변수와 경기 관성 변수 (AR항) 스케일 통일 
     # 종속변수인 y도 반드시 함께 100을 곱해줘야 모델이 망가지지 않습니다.
     if "y" in df.columns:
         df["y"]    = df["y"] * 100.0
