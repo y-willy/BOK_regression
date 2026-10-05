@@ -54,7 +54,7 @@ from matplotlib.patches import Patch
 HAC_LAGS = 4
 # 현재 스크립트 파일이 있는 디렉토리를 기본 경로로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE     = r"C:\Users\willy\OneDrive\바탕 화면\KHPC\회귀"
+BASE     = r"C:\Users\willy\OneDrive\바탕 화면\통화정책\회귀분석"
 OUT_DIR  = SCRIPT_DIR
 ESI_PATH = os.path.join(BASE, "경제심리지수.xlsx")
 os.makedirs(OUT_DIR, exist_ok=True)
