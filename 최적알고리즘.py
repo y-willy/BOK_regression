@@ -49,12 +49,14 @@ import matplotlib.font_manager as fm
 from matplotlib.patches import Patch
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  설정  ← 경로만 수정하세요
+#  설정  ← 경로가 자동으로 설정됩니다
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HAC_LAGS = 4
+# 현재 스크립트 파일이 있는 디렉토리를 기본 경로로 설정
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE     = r"C:\Users\willy\OneDrive\바탕 화면\KHPC\회귀"
-OUT_DIR  = r"C:\Users\willy\OneDrive\바탕 화면\KHPC\회귀"
-ESI_PATH = r"C:\Users\willy\OneDrive\바탕 화면\KHPC\회귀\경제심리지수.xlsx"
+OUT_DIR  = SCRIPT_DIR
+ESI_PATH = os.path.join(BASE, "경제심리지수.xlsx")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -151,7 +153,7 @@ def load_macro() -> pd.DataFrame:
     frames = []
     for key, (fname, col) in specs.items():
         try:
-            df = pd.read_excel(f"{BASE}/{fname}")
+            df = pd.read_excel(f"{BASE}/{fname}")   
             df["분기"] = df.iloc[:, 0].apply(normalize_quarter)
             frames.append(df[["분기", col]].rename(columns={col: key}))
         except Exception as e:
@@ -252,42 +254,167 @@ def load_industries() -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def build_model_data(macro: pd.DataFrame, ind_df: pd.DataFrame) -> pd.DataFrame:
     """
-    거시변수 + 산업 성장률 병합 후 시차 변수 및 코로나 더미 생성.
-    dropna는 시차 생성 후 한 번만 수행.
+    거시변수 + 산업 성장률 병합 후 0~4분기 모든 시차 변수 생성.
     """
     df = macro.merge(ind_df, on="분기", how="inner").reset_index(drop=True)
 
-    # 시차 변수
-    df["fx_lag1"]        = df["fx"].shift(1)
-    df["cpi_lag1"]       = df["cpi"].shift(1)
-    df["esi_lag1"]       = df["esi"].shift(1)
-    df["y_lag1"]         = df["y"].shift(1)
-    df["y_lag4"]         = df["y"].shift(4)
-    df["rate_up_w_lag2"] = df["rate_up_w"].shift(1)
-    df["rate_dn_w_lag2"] = df["rate_dn_w"].shift(1)
+    # 1. 종속변수 스케일링 (1단위 = 1%p)
+    if "y" in df.columns:
+        df["y"] = df["y"] * 100.0
 
-    # 코로나19 더미 (주석에 맞춰 2020Q4로 수정\)
+    # 2. 거시변수별 0~4 시차 생성 및 스케일링
+    # ※ 스케일링은 원본 변수에 먼저 적용한 뒤 시차를 생성해야
+    #    lag0이 원본 컬럼과 중복(데이터 누수)되는 문제를 방지한다.
+    vars_to_lag = ["rate_up_w", "rate_dn_w", "gdp", "fx", "cpi", "esi"]
+    for var in vars_to_lag:
+        # 원본을 스케일링한 임시 시리즈
+        if "rate" in var:
+            scaled = df[var] * 25.0
+        else:
+            scaled = df[var] * 100.0
+
+        for lag in range(5):
+            col_name = f"{var}_lag{lag}"
+            df[col_name] = scaled.shift(lag)
+
+        # 원본 컬럼(비스케일)은 시차 생성 후 제거 — 모델에 직접 투입되지 않도록
+        # (gdp, fx 등은 lag0 컬럼으로만 사용)
+        if var in df.columns:
+            df.drop(columns=[var], inplace=True, errors="ignore")
+
+    # 3. 경기 관성 및 계절성 (AR항)
+    df["y_lag1"] = df["y"].shift(1)
+    df["y_lag4"] = df["y"].shift(4)
+
+    # 4. 코로나19 더미
     df["covid"] = ((df["분기"] >= "2020Q1") & (df["분기"] <= "2020Q4")).astype(int)
 
-    # 1. 금리 변수: 기존 1단위 = 0.25%p였으므로, 4로 나누어 1단위 = 1%p(100bp)로 변경
-    df["rate_up_w_lag2"] = df["rate_up_w_lag2"] * 25.0
-    df["rate_dn_w_lag2"] = df["rate_dn_w_lag2"] * 25.0
-
-    # 2. 거시 통제변수들 (로그차분): 기존 1단위 = 100%였으므로, 100을 곱해 1단위 = 1%p로 변경
-    df["gdp"]      = df["gdp"] * 100.0
-    df["fx"]       = df["fx"] * 100.0
-    df["fx_lag1"]  = df["fx_lag1"] * 100.0
-    df["cpi_lag1"] = df["cpi_lag1"] * 100.0
-    df["esi_lag1"] = df["esi_lag1"] * 100.0
-    
-    # 3. 종속변수와 경기 관성 변수 (AR항) 스케일 통일 ⭐️
-    # 종속변수인 y도 반드시 함께 100을 곱해줘야 모델이 망가지지 않습니다.
-    if "y" in df.columns:
-        df["y"]    = df["y"] * 100.0
-    df["y_lag1"]   = df["y_lag1"] * 100.0
-    df["y_lag4"]   = df["y_lag4"] * 100.0
-
     return df.dropna().reset_index(drop=True)
+
+
+def find_optimal_lags(name: str, df: pd.DataFrame, ar_vars: list) -> list[str]:
+    """
+    SFS 스타일로 각 변수의 최적 시차(0~4) 탐색.
+    기준: 해당 변수의 p-value 최소화 (동률 시 R2 최대화)
+    금리 인상/인하는 동일 시차 적용.
+    """
+    target_vars = ["gdp", "fx", "cpi", "esi", "rate_up_w", "rate_dn_w"]
+    fixed_vars  = [v for v in ar_vars + ["covid"] if v in df.columns]
+    
+    optimal_lags = {} # 최적 시차 저장용 딕셔너리
+    current_selected = fixed_vars.copy()
+    final_x_cols     = fixed_vars.copy()
+    
+    print(f"  [시차 최적화] {name} 탐색 중...")
+    
+    for var in target_vars:
+        if var == "rate_up_w":
+            # ── rate_up_w / rate_dn_w 동일 시차: 두 p-value 합 최소 기준 ──
+            best_lag   = 0
+            min_p_sum  = np.inf
+            max_r2     = -1.0
+
+            for lag in range(5):
+                up_cand = f"rate_up_w_lag{lag}"
+                dn_cand = f"rate_dn_w_lag{lag}"
+                # 두 변수를 동시에 투입
+                test_vars = (
+                    [c for c in current_selected
+                     if not c.startswith("rate_up_w_lag")
+                     and not c.startswith("rate_dn_w_lag")]
+                    + [up_cand, dn_cand]
+                )
+                try:
+                    X     = sm.add_constant(df[test_vars])
+                    model = sm.OLS(df["y"], X).fit(
+                        cov_type="HAC", cov_kwds={"maxlags": HAC_LAGS}
+                    )
+                    p_up  = model.pvalues.get(up_cand, np.nan)
+                    p_dn  = model.pvalues.get(dn_cand, np.nan)
+                    if np.isnan(p_up) or np.isnan(p_dn):
+                        continue
+                    p_sum = p_up + p_dn
+                    r2    = model.rsquared
+
+                    if p_sum < min_p_sum - 1e-5:
+                        min_p_sum = p_sum
+                        max_r2    = r2
+                        best_lag  = lag
+                    elif abs(p_sum - min_p_sum) < 1e-5 and r2 > max_r2:
+                        max_r2   = r2
+                        best_lag = lag
+                except Exception:
+                    continue
+
+            print(f"    - rate_up_w / rate_dn_w 공통 최적 시차: t-{best_lag} "
+                  f"(p합 기준)")
+            # rate_up_w 등록
+            optimal_lags["rate_up_w"] = best_lag
+            up_col = f"rate_up_w_lag{best_lag}"
+            final_x_cols    = [c for c in final_x_cols    if not c.startswith("rate_up_w_lag")]
+            current_selected= [c for c in current_selected if not c.startswith("rate_up_w_lag")]
+            final_x_cols.append(up_col)
+            current_selected.append(up_col)
+            continue  # rate_dn_w는 아래 블록에서 처리
+
+        elif var == "rate_dn_w":
+            # rate_up_w와 동일 시차 적용
+            best_lag = optimal_lags.get("rate_up_w", 0)
+            print(f"    - rate_dn_w 시차: rate_up_w와 동일하게 t-{best_lag} 적용")
+            optimal_lags[var] = best_lag
+            best_col = f"{var}_lag{best_lag}"
+            final_x_cols    = [c for c in final_x_cols    if not c.startswith(f"{var}_lag")]
+            final_x_cols.append(best_col)
+            current_selected= [c for c in current_selected if not c.startswith(f"{var}_lag")]
+            current_selected.append(best_col)
+            continue  # 아래 탐색 블록 건너뜀
+
+        # ── 일반 변수(gdp, fx, cpi, esi): p-value 최소 시차 탐색 ──
+        best_lag = 0
+        min_p    = 1.1
+        max_r2   = -1.0
+
+        for lag in range(5):
+            candidate = f"{var}_lag{lag}"
+            test_vars = (
+                [c for c in current_selected if not c.startswith(f"{var}_lag")]
+                + [candidate]
+            )
+            try:
+                X     = sm.add_constant(df[test_vars])
+                model = sm.OLS(df["y"], X).fit(
+                    cov_type="HAC", cov_kwds={"maxlags": HAC_LAGS}
+                )
+                p_val = model.pvalues.get(candidate, np.nan)
+                r2    = model.rsquared
+                if np.isnan(p_val):
+                    continue
+                if p_val < min_p - 1e-5:
+                    min_p    = p_val
+                    max_r2   = r2
+                    best_lag = lag
+                elif abs(p_val - min_p) < 1e-5 and r2 > max_r2:
+                    max_r2   = r2
+                    best_lag = lag
+            except Exception:
+                continue
+
+        optimal_lags[var] = best_lag
+        best_col = f"{var}_lag{best_lag}"
+        final_x_cols    = [c for c in final_x_cols    if not c.startswith(f"{var}_lag")]
+        final_x_cols.append(best_col)
+        current_selected= [c for c in current_selected if not c.startswith(f"{var}_lag")]
+        current_selected.append(best_col)
+
+    # 출력 메시지에서 AR항과 코로나 더미 제외하고 주요 거시변수만 표시
+    print_vars = []
+    for v in final_x_cols:
+        if "_lag" in v and not v.startswith("y_lag"): # AR항 제외
+            base, lag = v.rsplit("_lag", 1)
+            print_vars.append(f"{VAR_LABEL.get(base, base)}(t-{lag})") # VAR_LABEL 사용
+    print(f"    - 결과: " + ", ".join(print_vars))
+
+    return final_x_cols
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  OLS 추정 (Newey-West HAC 표준오차)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -320,16 +447,23 @@ def run_ols(name: str, df: pd.DataFrame, x_cols: list) -> dict | None:
         vif_df = pd.DataFrame()
 
     dw      = sm.stats.stattools.durbin_watson(model.resid)
-    p_up    = model.pvalues.get("rate_up_w_lag2", np.nan)
-    p_dn    = model.pvalues.get("rate_dn_w_lag2", np.nan)
-    sens_up = model.params.get("rate_up_w_lag2", 0)
-    sens_dn = model.params.get("rate_dn_w_lag2", 0)
+    
+    # 최적화된 시차 변수명 찾기
+    up_col = next((c for c in x_cols if "rate_up_w_lag" in c), None)
+    dn_col = next((c for c in x_cols if "rate_dn_w_lag" in c), None)
+    
+    p_up    = model.pvalues.get(up_col, np.nan) if up_col else np.nan
+    p_dn    = model.pvalues.get(dn_col, np.nan) if dn_col else np.nan
+    sens_up = model.params.get(up_col, 0) if up_col else 0
+    sens_dn = model.params.get(dn_col, 0) if dn_col else 0
 
     return {
         "name":        name,
         "model":       model,
         "x_cols":      x_cols,
         "df":          df,
+        "up_col":      up_col,
+        "dn_col":      dn_col,
         "sensitivity": sens_up - sens_dn,   # 금리 순 민감도
         "sens_up":     sens_up,
         "sens_dn":     sens_dn,
@@ -375,7 +509,13 @@ def print_result(res: dict):
     print(f"  {'-'*65}")
 
     for v in m.params.index:
-        label = VAR_LABEL.get(v, v)
+        # 시차 정보가 포함된 변수명 처리 (예: gdp_lag2 -> GDP(t-2))
+        if "_lag" in v:
+            base, lag = v.rsplit("_lag", 1)
+            label = f"{VAR_LABEL.get(base, base)}(t-{lag})"
+        else:
+            label = VAR_LABEL.get(v, v)
+            
         coef  = m.params[v]
         se    = m.bse[v]
         tval  = coef / se if se > 0 else np.nan
@@ -384,8 +524,11 @@ def print_result(res: dict):
               f"{sig_star(pval)}")
 
     print(f"\n  ── 금리 민감도 ─────────────────────────────────────")
-    print(f"  금리인상 계수 (β₁): {res['sens_up']:>+8.4f}  {sig_star(res['p_up'])}")
-    print(f"  금리인하 계수 (β₂): {res['sens_dn']:>+8.4f}  {sig_star(res['p_dn'])}")
+    up_lbl = f"인상(t-{res['up_col'].split('_lag')[1]})" if res['up_col'] else "인상"
+    dn_lbl = f"인하(t-{res['dn_col'].split('_lag')[1]})" if res['dn_col'] else "인하"
+    
+    print(f"  금리{up_lbl} 계수 (β₁): {res['sens_up']:>+8.4f}  {sig_star(res['p_up'])}")
+    print(f"  금리{dn_lbl} 계수 (β₂): {res['sens_dn']:>+8.4f}  {sig_star(res['p_dn'])}")
     print(f"  순 민감도 (β₁−β₂): {res['sensitivity']:>+8.4f}")
 
     # 경제학적 해석
@@ -512,9 +655,11 @@ def plot_sensitivity_bar(all_results: dict):
     # 95% CI: SE(β₁−β₂) ≈ √(SE(β₁)²+SE(β₂)²) (두 계수 독립 가정)
     ci_lo, ci_hi, bar_colors = [], [], []
     for _, res in rows:
-        m  = res["model"]
-        se = np.sqrt(m.bse.get("rate_up_w_lag2", 0) ** 2 +
-                     m.bse.get("rate_dn_w_lag2", 0) ** 2)
+        m      = res["model"]
+        up_col = res.get("up_col") or "rate_up_w_lag2"
+        dn_col = res.get("dn_col") or "rate_dn_w_lag2"
+        se = np.sqrt(m.bse.get(up_col, 0) ** 2 +
+                     m.bse.get(dn_col, 0) ** 2)
         s  = res["sensitivity"]
         ci_lo.append(s - 1.96 * se)
         ci_hi.append(s + 1.96 * se)
@@ -572,8 +717,8 @@ def plot_coef_heatmap(all_results: dict):
     - 셀 텍스트: 실제 계수값, 색은 정규화값 기준 자동 흰/검
     """
     # ── 변수 정의 (금리 민감도로 통합) ──────────────────────────────
-    KEY_VARS = ["rate_sensitivity", "gdp", "fx", "cpi_lag1", "esi_lag1"]
-    KEY_LBLS = ["금리민감도\n", "GDP", "환율", "CPI", "ESI"]
+    KEY_VARS = ["rate_sensitivity", "gdp", "fx", "cpi", "esi"]
+    KEY_LBLS = ["금리민감도", "GDP", "환율", "CPI", "ESI"]
 
     # 산업 순서: correlation_heatmap과 동일하게 정렬 (원하는 순서로 수동 지정 가능)
     preferred_order = [
@@ -597,18 +742,13 @@ def plot_coef_heatmap(all_results: dict):
         rsq[name] = res["rsq"]
 
         # 금리 민감도 = β₁(인상) − β₂(인하)
-        mat[i, 0] = res["sensitivity"]/4.0
+        mat[i, 0] = res["sensitivity"]
 
-        # 나머지 변수
-        raw_map = {
-            "gdp":      "gdp",
-            "fx":       "fx",
-            "cpi_lag1": "cpi_lag1",
-            "esi_lag1": "esi_lag1",
-        }
+        # 나머지 변수 (최적 시차가 적용된 컬럼 찾기)
         for j, vkey in enumerate(KEY_VARS[1:], start=1):
-            col = raw_map.get(vkey, vkey)
-            if col in m.params.index:
+            # vkey는 'gdp', 'fx' 등. 실제 컬럼은 'gdp_lag0', 'gdp_lag1' 중 하나
+            col = next((c for c in m.params.index if c.startswith(f"{vkey}_lag")), None)
+            if col:
                 mat[i, j] = m.params[col]
 
     # ── 컬럼별 정규화 (상관계수 히트맵과 동일한 방식) ────────────────
@@ -641,7 +781,7 @@ def plot_coef_heatmap(all_results: dict):
 
     # x축 레이블
     ax.set_xticks(range(n_vars))
-    ax.set_xticklabels(KEY_LBLS, fontsize=10)
+    ax.set_xticklabels(KEY_LBLS, fontsize=10, rotation=30, ha="right")
     ax.xaxis.set_label_position("bottom")
     ax.xaxis.tick_bottom()
 
@@ -656,7 +796,8 @@ def plot_coef_heatmap(all_results: dict):
             v = mat[i, j]
             if np.isnan(v):
                 continue
-            txt_color = "black"
+            norm_v = mat_norm[i, j]
+            txt_color = "white" if abs(norm_v) > 0.55 else "black"
             ax.text(j, i, f"{v:.3f}",
                     ha="center", va="center",
                     fontsize=9, fontweight="bold",
@@ -665,7 +806,7 @@ def plot_coef_heatmap(all_results: dict):
     # 컬러바 (correlation_heatmap 스타일: 세로, 우측)
     cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.03)
     cbar.set_label("회귀계수", fontsize=9, rotation=90, labelpad=6)
-    cbar.set_ticks([-3, -2.75, -2.5, -2.25, -2, -1.75, -1.5, -1.25, -1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25,2.5, 2.75, 3])
+    cbar.set_ticks([-3, -2.75, -2.5, -2.25, -2, -1.75, -1.5, -1.25, -1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.75, 3])
 
     ax.set_title(
         "산업별 거시변수 회귀계수 히트맵\n(금리민감도)",
@@ -710,17 +851,18 @@ def plot_sd_impact_heatmap(all_results: dict, macro: pd.DataFrame):
 
         for j, lbl in enumerate(KEY_LBLS):
             if lbl == "금리민감도":
-                x = df["rate_up_w_lag2"] - df["rate_dn_w_lag2"]
-            elif lbl == "환율":
-                x = df["fx"]
-            elif lbl == "GDP":
-                x = df["gdp"]
-            elif lbl == "CPI":
-                x = df["cpi_lag1"]
-            elif lbl == "ESI":
-                x = df["esi_lag1"]
+                # 최적화된 인상/인하 컬럼 사용
+                up_col = res.get("up_col")
+                dn_col = res.get("dn_col")
+                if up_col and dn_col:
+                    x = df[up_col] - df[dn_col]
+                else:
+                    x = pd.Series(np.nan, index=df.index)
             else:
-                x = pd.Series(np.nan, index=df.index)
+                # 기타 변수 (gdp, fx 등)의 최적 시차 컬럼 찾기
+                vkey = {"GDP": "gdp", "환율": "fx", "CPI": "cpi", "ESI": "esi"}.get(lbl)
+                col = next((c for c in df.columns if c.startswith(f"{vkey}_lag")), None)
+                x = df[col] if col else pd.Series(np.nan, index=df.index)
 
             if x.isna().all() or df["y"].isna().all():
                 corr = np.nan
@@ -752,7 +894,7 @@ def plot_sd_impact_heatmap(all_results: dict, macro: pd.DataFrame):
     ax.tick_params(which="minor", length=0)
 
     ax.set_xticks(range(n_vars))
-    ax.set_xticklabels(KEY_LBLS, fontsize=10)
+    ax.set_xticklabels(KEY_LBLS, fontsize=10, rotation=30, ha="right")
     ax.xaxis.tick_bottom()
 
     ylbls = [f"{n}\nR²={rsq[n]:.3f}" for n in ind_names]
@@ -764,7 +906,8 @@ def plot_sd_impact_heatmap(all_results: dict, macro: pd.DataFrame):
             v = mat[i, j]
             if np.isnan(v):
                 continue
-            txt_color = "black"
+            norm_v = mat_norm[i, j]
+            txt_color = "white" if abs(norm_v) > 0.55 else "black"
             ax.text(j, i, f"{v:.3f}",
                     ha="center", va="center",
                     fontsize=9, fontweight="bold",
@@ -818,14 +961,20 @@ def main():
 
     for name, ind_df in industries.items():
         print(f"\n{'─' * 50}")
-        print(f"  [{name}] 추정 중...")
+        print(f"  [{name}] 분석 시작...")
 
-        df     = build_model_data(macro, ind_df)
-        x_cols = INDUSTRY_X.get(name, BASE_X)  # 산업별 맞춤 AR항
+        df = build_model_data(macro, ind_df)
+        
+        # 1. AR항 결정 (기존 설정 활용)
+        orig_x = INDUSTRY_X.get(name, BASE_X)
+        ar_vars = [v for v in orig_x if v in ["y_lag1", "y_lag4"]]
+        
+        # 2. 최적 시차 탐색
+        opt_x_cols = find_optimal_lags(name, df, ar_vars)
 
-        print(f"  관측치: {len(df)}  /  설명변수: {len(x_cols)}개")
+        print(f"  관측치: {len(df)}  /  최종 설명변수: {len(opt_x_cols)}개")
 
-        res = run_ols(name, df, x_cols)
+        res = run_ols(name, df, opt_x_cols)
         if res is None:
             continue
 
