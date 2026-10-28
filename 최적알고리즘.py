@@ -52,10 +52,10 @@ from matplotlib.patches import Patch
 #  설정  ← 경로가 자동으로 설정됩니다
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HAC_LAGS = 4
-# 현재 스크립트 파일이 있는 디렉토리를 기본 경로로 설정
+# Resolve paths relative to this file rather than the launching shell.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE     = r"C:\Users\willy\OneDrive\바탕 화면\통화정책\회귀분석"
-OUT_DIR  = SCRIPT_DIR
+BASE = SCRIPT_DIR
+OUT_DIR = os.path.join(SCRIPT_DIR, "outputs", "optimized")
 ESI_PATH = os.path.join(BASE, "경제심리지수.xlsx")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -153,7 +153,7 @@ def load_macro() -> pd.DataFrame:
     frames = []
     for key, (fname, col) in specs.items():
         try:
-            df = pd.read_excel(f"{BASE}/{fname}")   
+            df = pd.read_excel(os.path.join(BASE, fname))   
             df["분기"] = df.iloc[:, 0].apply(normalize_quarter)
             frames.append(df[["분기", col]].rename(columns={col: key}))
         except Exception as e:
@@ -200,7 +200,7 @@ def load_industries() -> dict:
     # 건설업, 농림어업
     for name, fname in [("건설업", "건설업.xlsx"), ("농림어업", "농림어업.xlsx")]:
         try:
-            df = pd.read_excel(f"{BASE}/{fname}")
+            df = pd.read_excel(os.path.join(BASE, fname))
             df["분기"] = df.iloc[:, 0].apply(normalize_quarter)
             col = next((c for c in df.columns if "로그" in str(c) or "증감" in str(c)), None)
             if col:
@@ -212,7 +212,7 @@ def load_industries() -> dict:
 
     # 제조업 (IT / 비IT / 전체)
     try:
-        mfg = pd.read_excel(f"{BASE}/제조업.xlsx", sheet_name=0)
+        mfg = pd.read_excel(os.path.join(BASE, "제조업.xlsx"), sheet_name=0)
         mfg["분기"] = mfg.iloc[:, 0].apply(normalize_quarter)
         for name, col in [("IT제조업",   "IT 제조업 로그차분"),
                           ("제조업전체", "제조업 전체 로그차분"),
@@ -226,7 +226,7 @@ def load_industries() -> dict:
 
     # 서비스업 (실제 파일이 CP949 CSV, 확장자만 .xlsx)
     try:
-        svc = pd.read_csv(f"{BASE}/서비스업.xlsx", encoding="cp949")
+        svc = pd.read_csv(os.path.join(BASE, "서비스업.xlsx"), encoding="cp949")
         svc["분기"] = svc["분기"].apply(normalize_quarter)
 
         col_map = {
